@@ -1,6 +1,5 @@
-#!/usr/bin/env python
 #
-# Copyright (c) 2017-2018 Datrium Inc.
+# Copyright (c) 2017-2019 Datrium Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,12 +14,14 @@
 # limitations under the License.
 #
 
+import datetime
 import json
 import logging
 import os
 import re
 import requests
 import sys
+import urlparse
 
 logging.getLogger('requests.packages.urllib3.connectionpool').setLevel(logging.WARN)
 
@@ -29,147 +30,160 @@ class PostgrestException(requests.exceptions.HTTPError):
     pass
 
 
-class Resource(object):
-    '''
-    Generic Resource class.
+class PostgrestResource(object):
+    _meta_table_name = ''
 
-    Usage:
-    class MyResource(Resource):
-        POSTGREST_URL = 'http://my.server.com:3000/my_table'
+    def __init__(self, api, attrs=None):
+        self.api = api
+        attrs = attrs or {}
+        self.attrs = attrs.copy()
 
-    objs = MyResource.filter(id='lte.5')
+    @property
+    def connection_url(self):
+        return self.api.connection_url + '/%s' % self._meta_table_name
 
+    @property
+    def _get_or_create_keys(self):
+        raise NotImplementedError()  # must be implemented by concrete Resource
 
-    '''
-    POSTGREST_URL = None  # must be defined by concrete subclass, else ValueError at runtime!
-    session = requests.Session()
+    @property
+    def _pk_dict(self):
+        raise NotImplementedError()  # must be implemented by concrete Resource
 
-    def __init__(self, *args, **kwargs):
-        if self.POSTGREST_URL is None:
-            raise ValueError('%s must define a POSTGREST_URL!' % self.__class__.__name__)
-        super(Resource, self).__init__(*args, **kwargs)
+    @property
+    def _pk_url(self):
+        query_string = '&'.join(['%s=%s' % (k,v) for k,v in self._pk_dict.items()])
+        return self.connection_url + '?' + query_string
 
-    @classmethod
-    def common_headers(cls):
-        return  {
-            'Prefer': 'return=representation',
-            'Content-type': 'application/json'
-        }
+    def __getattr__(self, name):
+        if name in self.attrs:
+            return self.attrs[name]
+        raise AttributeError("'%s' object has no attribute '%s'" % (self.__class__.__name__, name))
 
-    @classmethod
-    def urlbase(cls):
-        if cls.POSTGREST_URL is None:
-            raise ValueError('%s must define a POSTGREST_URL!' % cls.__name__)
-        return cls.POSTGREST_URL
+    def __hash__(self):
+        return hash(tuple(sorted(self._pk_dict.items())))
 
-    @classmethod
-    def get(cls, **kwargs):
-        '''
-        get kwargs need to be properly formatted postgrest queries.
-        '''
-        if 'id' in kwargs:  # this is a specific filter, so reduce it
-            value = str(kwargs['id'])
-            if not value.startswith('eq.'):
-                value = 'eq.%s' % value
-            kwargs = {'id': value}
-        objects = cls.filter(**kwargs)
+    def __eq__(self, other):
+        return hash(self) == hash(other)
+
+    @property
+    def as_json(self):
+        attrs = self.attrs.copy()
+        attrs['_class'] = '.'.join([self.__class__.__module__, self.__class__.__name__])
+        return json.dumps(attrs, sort_keys=True)
+
+    def as_datetime(self, d):
+        formats = ['%Y-%m-%dT%H:%M:%S+00:00', '%Y-%m-%dT%H:%M:%S.%f+00:00']
+        for fmt in formats:
+            try:
+                return datetime.datetime.strptime(d, fmt)
+            except ValueError:
+                continue
+        raise ValueError('%s does not match any of %s' % (d, formats))
+
+    def filter(self, params=None):
+        headers = self.api.common_headers()
+        params = params or {}
+        logging.debug('url: %s, params: %s' % (self.connection_url, params))
+        try:
+            resp = self.api.session.get(self.connection_url, params=params, headers=headers)
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            raise PostgrestException(str(e), response=resp)
+        objs, _ = resp.json(), resp.headers
+        return [self.__class__(self.api, attrs=x) for x in objs]
+
+    def get(self, params):
+        objects = self.filter(params)
         if objects:
             assert len(objects) == 1, objects
             return objects[0]
         return None
 
-    @classmethod
-    def post(cls, **kwargs):
-        headers = cls.common_headers()
-        data = kwargs or {}
-        resp = cls.session.post(cls.urlbase(), data=json.dumps(data), headers=headers)
-        try:
-            resp.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            raise PostgrestException(str(e))
-        return resp.json(), resp.headers
+    def refresh(self):
+        obj = self.get(self._pk_dict)
+        self.attrs = obj.attrs.copy()
 
-    @classmethod
-    def filter(cls, **kwargs):
-        headers = cls.common_headers()
-        params = kwargs or {}
-        # convert jsonb param from __jsonb__ to ->>
-        # https://github.com/begriffs/postgrest/pull/183
-        for key in params.keys():
-            if '__jsonb__' in key:
-                params[key.replace('__jsonb__', '->>')] = params[key]
-                del params[key]
-            if '__json__' in key:
-                params[key.replace('__json__', '->>')] = params[key]
-                del params[key]
-        url = cls.urlbase()
-        logging.debug('url: %s, params: %s' % (url, params))
-        resp = cls.session.get(cls.urlbase(), params=params, headers=headers)
-        try:
-            resp.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            raise PostgrestException(str(e))
-        objs, _ = resp.json(), resp.headers
-        return [cls(attrs=x) for x in objs]
-
-    def put(self, **kwargs):
-        data = kwargs or {}
-        headers = self.common_headers()
-        json_data = json.dumps(data)
+    def put(self, payload):
+        headers = self.api.common_headers()
+        json_data = json.dumps(payload)
         json_data = re.sub(r'\\u0000', '', json_data)
-        resp = self.session.patch(self.__url, data=json_data, headers=headers)
         try:
+            resp = self.api.session.patch(self._pk_url, data=json_data, headers=headers)
             resp.raise_for_status()
         except requests.exceptions.HTTPError as e:
             logging.exception(e)
             logging.error(json_data)
-            raise PostgrestException(str(e))
+            raise PostgrestException(str(e), response=resp)
         return resp.json(), resp.headers
 
-    def __init__(self, attrs=None):
-        attrs = attrs or {}
-        self.attrs = attrs.copy()
-
-    def __eq__(self, other):
-        return self.__class__ == other.__class__ and self.attrs.get('id') == other.attrs.get('id')
-
-    def __str__(self):
-        return '<%s: %s>' % (self.__class__.__name__, self.__dict__)
-
-    def __hash__(self):
-        return hash(self._postgrest_url)
-
-    def refresh(self):
-        obj = self.__class__.get(id=self.attrs.get('id'))
-        self.attrs = obj.attrs.copy()
-
-    def update(self, **kwargs):
-        # filter our keys with None values, because right now these cause data to be deleted
-        # but, this means there is no way to intentionally delete/null values right now
-        # we can add in a null_keys that contains the column names to
-        # allow null values for.
-        kwargs = {k:v for k, v in kwargs.items() if v is not None}
-        self.put(**kwargs)
+    def update(self, payload=None):
+        if payload:
+            self.put(payload)
         self.refresh()
 
-    @property
-    def url(self):
-        return self.urlbase() + '?id=eq.%d' % self.attrs.get('id')
-
-    @classmethod
-    def create(cls, **kwargs):
-        obj, _ = cls.post(**kwargs)
-        assert len(obj) == 1, obj
-        return cls(attrs=obj[0])
-
-    def rpc(self, name, **kwargs):
-        url = self.urlbase().rstrip('/') + '/rpc/' + name
-        headers = self.common_headers()
-        data = kwargs or {}
-        resp = self.session.post(url, data=json.dumps(data), headers=headers)
+    def post(self, payload=None):
+        headers = self.api.common_headers()
+        # headers['Prefer'] = 'return=representation,resolution=merge-duplicates'  # cannot us resolution for pg < 9.5 (asupdb)
+        headers['Prefer'] = 'return=representation'
         try:
+            resp = self.api.session.post(self.connection_url, data=json.dumps(payload), headers=headers)
             resp.raise_for_status()
         except requests.exceptions.HTTPError as e:
-            raise PostgrestException(str(e))
-        return resp.json()[0], resp.headers
+            raise PostgrestException(str(e), response=resp)
+        return resp.json(), resp.headers
 
+    def create(self, payload):
+        attrs, headers = self.post(payload)
+        return self.__class__(self.api, attrs=attrs[0])
+
+    def delete(self):
+        headers = self.api.common_headers()
+        try:
+            resp = self.api.session.delete(self._pk_url, headers=headers)
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            logging.exception(e)
+            raise PostgrestException(str(e), response=resp)
+        return
+
+    def get_or_create(self, params):
+        for k in self._get_or_create_keys:
+            if k not in params:
+                raise ValueError('Must provide "%s" param for %s get_or_create!' % (k, self.__class__.__name__))
+        try:
+            return self.create(params), True
+        except PostgrestException as e:
+            if '409 Client Error: Conflict for' not in str(e):
+                raise
+        d = {}
+        for k, v in params.items():
+            if k in self._get_or_create_keys:
+                d[k] = 'eq.%s' % v
+                if v is None:
+                    d[k] = 'is.null'
+        return self.get(d), False
+
+
+class PostgrestAPI(object):
+    resources = [PostgrestResource]
+
+    def __init__(self, connection_url=None, session=None):
+        self.connection_url = connection_url
+        if not re.match(r'https?://', self.connection_url):
+            self.connection_url = 'http://' + self.connection_url
+        parts = urlparse.urlparse(self.connection_url)
+        self.connection_url = parts.scheme + '://' + parts.netloc
+        self.session = session or requests.Session()
+        for cls in self.resources:
+            setattr(self, cls.__name__, cls(self))
+        self.related_apis = {}
+
+    def common_headers(self):
+        return  {
+            'Prefer': 'return=representation',
+            'Content-type': 'application/json'
+        }
+
+    def add_related_api(self, name, api):
+        self.related_apis[name] = api
