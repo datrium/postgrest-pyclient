@@ -73,7 +73,7 @@ class PostgrestResource(object):
         return json.dumps(attrs, sort_keys=True)
 
     def as_datetime(self, d):
-        formats = ['%Y-%m-%dT%H:%M:%S+00:00', '%Y-%m-%dT%H:%M:%S.%f+00:00']
+        formats = ['%Y-%m-%dT%H:%M:%S+00:00', '%Y-%m-%dT%H:%M:%S.%f+00:00', '%Y-%m-%dT%H:%M:%S.%f']
         for fmt in formats:
             try:
                 return datetime.datetime.strptime(d, fmt)
@@ -84,7 +84,7 @@ class PostgrestResource(object):
     def filter(self, params=None):
         headers = self.api.common_headers()
         params = params or {}
-        logging.debug('url: %s, params: %s' % (self.connection_url, params))
+        #logging.info('url: %s, params: %s' % (self.connection_url, params))
         try:
             resp = self.api.session.get(self.connection_url, params=params, headers=headers)
             resp.raise_for_status()
@@ -148,21 +148,28 @@ class PostgrestResource(object):
         return
 
     def get_or_create(self, params):
+        def __get(params):
+            d = {}
+            for k, v in params.items():
+                if k in self._get_or_create_keys:
+                    d[k] = 'eq.%s' % v
+                    if v is None:
+                        d[k] = 'is.null'
+            return self.get(d)
+
         for k in self._get_or_create_keys:
             if k not in params:
                 raise ValueError('Must provide "%s" param for %s get_or_create!' % (k, self.__class__.__name__))
+
+        found = __get(params)
+        if found:
+            return found, False
         try:
             return self.create(params), True
         except PostgrestException as e:
             if '409 Client Error: Conflict for' not in str(e):
                 raise
-        d = {}
-        for k, v in params.items():
-            if k in self._get_or_create_keys:
-                d[k] = 'eq.%s' % v
-                if v is None:
-                    d[k] = 'is.null'
-        return self.get(d), False
+        return __get(params), False
 
 
 class PostgrestAPI(object):
