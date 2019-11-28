@@ -21,7 +21,10 @@ import os
 import re
 import requests
 import sys
-import urlparse
+try:
+    import urllib.parse as urlparse  # python3
+except ImportError:
+    import urlparse  # python2
 
 logging.getLogger('requests.packages.urllib3.connectionpool').setLevel(logging.WARN)
 
