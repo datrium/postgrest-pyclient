@@ -12,7 +12,7 @@ pip install --process-dependency-links https://github.com/datrium/postgrest-pycl
 ```python
     import postgrest
 
-    class MyTable(postgrest.Resource):
+    class MyTable(postgrest.PostgrestResource):
         _meta_table_name = 'my_table'
 
         @property
