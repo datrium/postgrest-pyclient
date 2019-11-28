@@ -21,9 +21,10 @@ import os
 import re
 import requests
 import sys
-import urlparse
+import urllib.parse
 
-logging.getLogger('requests.packages.urllib3.connectionpool').setLevel(logging.WARN)
+logging.getLogger('requests.packages.urllib3.connectionpool').setLevel(
+    logging.WARN)
 
 
 class PostgrestException(requests.exceptions.HTTPError):
@@ -52,13 +53,15 @@ class PostgrestResource(object):
 
     @property
     def _pk_url(self):
-        query_string = '&'.join(['%s=%s' % (k,v) for k,v in self._pk_dict.items()])
+        query_string = '&'.join(
+            ['%s=%s' % (k, v) for k, v in self._pk_dict.items()])
         return self.connection_url + '?' + query_string
 
     def __getattr__(self, name):
         if name in self.attrs:
             return self.attrs[name]
-        raise AttributeError("'%s' object has no attribute '%s'" % (self.__class__.__name__, name))
+        raise AttributeError("'%s' object has no attribute '%s'" %
+                             (self.__class__.__name__, name))
 
     def __hash__(self):
         return hash(tuple(sorted(self._pk_dict.items())))
@@ -69,11 +72,15 @@ class PostgrestResource(object):
     @property
     def as_json(self):
         attrs = self.attrs.copy()
-        attrs['_class'] = '.'.join([self.__class__.__module__, self.__class__.__name__])
+        attrs['_class'] = '.'.join(
+            [self.__class__.__module__, self.__class__.__name__])
         return json.dumps(attrs, sort_keys=True)
 
     def as_datetime(self, d):
-        formats = ['%Y-%m-%dT%H:%M:%S+00:00', '%Y-%m-%dT%H:%M:%S.%f+00:00', '%Y-%m-%dT%H:%M:%S.%f']
+        formats = [
+            '%Y-%m-%dT%H:%M:%S+00:00', '%Y-%m-%dT%H:%M:%S.%f+00:00',
+            '%Y-%m-%dT%H:%M:%S.%f'
+        ]
         for fmt in formats:
             try:
                 return datetime.datetime.strptime(d, fmt)
@@ -86,7 +93,9 @@ class PostgrestResource(object):
         params = params or {}
         #logging.info('url: %s, params: %s' % (self.connection_url, params))
         try:
-            resp = self.api.session.get(self.connection_url, params=params, headers=headers)
+            resp = self.api.session.get(self.connection_url,
+                                        params=params,
+                                        headers=headers)
             resp.raise_for_status()
         except requests.exceptions.HTTPError as e:
             raise PostgrestException(str(e), response=resp)
@@ -109,7 +118,9 @@ class PostgrestResource(object):
         json_data = json.dumps(payload)
         json_data = re.sub(r'\\u0000', '', json_data)
         try:
-            resp = self.api.session.patch(self._pk_url, data=json_data, headers=headers)
+            resp = self.api.session.patch(self._pk_url,
+                                          data=json_data,
+                                          headers=headers)
             resp.raise_for_status()
         except requests.exceptions.HTTPError as e:
             logging.exception(e)
@@ -127,7 +138,9 @@ class PostgrestResource(object):
         # headers['Prefer'] = 'return=representation,resolution=merge-duplicates'  # cannot us resolution for pg < 9.5 (asupdb)
         headers['Prefer'] = 'return=representation'
         try:
-            resp = self.api.session.post(self.connection_url, data=json.dumps(payload), headers=headers)
+            resp = self.api.session.post(self.connection_url,
+                                         data=json.dumps(payload),
+                                         headers=headers)
             resp.raise_for_status()
         except requests.exceptions.HTTPError as e:
             raise PostgrestException(str(e), response=resp)
@@ -159,7 +172,9 @@ class PostgrestResource(object):
 
         for k in self._get_or_create_keys:
             if k not in params:
-                raise ValueError('Must provide "%s" param for %s get_or_create!' % (k, self.__class__.__name__))
+                raise ValueError(
+                    'Must provide "%s" param for %s get_or_create!' %
+                    (k, self.__class__.__name__))
 
         found = __get(params)
         if found:
@@ -179,7 +194,7 @@ class PostgrestAPI(object):
         self.connection_url = connection_url
         if not re.match(r'https?://', self.connection_url):
             self.connection_url = 'http://' + self.connection_url
-        parts = urlparse.urlparse(self.connection_url)
+        parts = urllib.parse.urlparse(self.connection_url)
         self.connection_url = parts.scheme + '://' + parts.netloc
         self.session = session or requests.Session()
         for cls in self.resources:
@@ -187,7 +202,7 @@ class PostgrestAPI(object):
         self.related_apis = {}
 
     def common_headers(self):
-        return  {
+        return {
             'Prefer': 'return=representation',
             'Content-type': 'application/json'
         }
